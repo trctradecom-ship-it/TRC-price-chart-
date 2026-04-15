@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>TRC Price Chart</title>
+
+    <!-- Chart Library -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
+    <!-- Ethers -->
+    <script src="https://cdn.jsdelivr.net/npm/ethers@6.6.2/dist/ethers.umd.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            background: #0f172a;
+            color: white;
+            font-family: Arial;
+        }
+
+        #chart {
+            width: 100%;
+            height: 100vh;
+        }
+
+        .title {
+            position: absolute;
+            top: 10px;
+            left: 20px;
+            font-size: 20px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="title">TRC Live Price Chart (Polygon)</div>
+<div id="chart"></div>
+
+<script>
+// ================= CONFIG =================
+const RPC = "https://polygon-rpc.com";
+const CONTRACT = "0x928D3aDE2713AD049b2123988f459F407E9C935e";
+
+// ABI (only required parts)
+const ABI = [
+    "function usdPrice() view returns (uint256)",
+
+    "event BuyWithPOL(address indexed user, uint256 polAmount, uint256 tokensReceived)",
+    "event BuyWithUSDT(address indexed user, uint256 usdtAmount, uint256 tokensReceived)",
+    "event SellForPOL(address indexed user, uint256 tokensSold, uint256 polReceived)",
+    "event SellForUSDT(address indexed user, uint256 tokensSold, uint256 usdtReceived)"
+];
+
+const provider = new ethers.JsonRpcProvider(RPC);
+const contract = new ethers.Contract(CONTRACT, ABI, provider);
+
+// ================= CHART =================
+const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+    layout: {
+        background: { color: "#0f172a" },
+        textColor: "#ffffff"
+    },
+    grid: {
+        vertLines: { color: "#1e293b" },
+        horzLines: { color: "#1e293b" }
+    }
+});
+
+const lineSeries = chart.addLineSeries();
+
+// ================= STATE =================
+let history = [];
+let currentPrice = 150; // BASE_PRICE
+let lastTime = 0;
+
+// helper
+function toNum(x, decimals=18) {
+    return Number(x) / (10 ** decimals);
+}
+
+// ================= LOAD HISTORY =================
+async function loadHistory() {
+    console.log("Loading history...");
+
+    const buysPOL = await contract.queryFilter("BuyWithPOL", 0, "latest");
+    const sellsPOL = await contract.queryFilter("SellForPOL", 0, "latest");
+    const buysUSDT = await contract.queryFilter("BuyWithUSDT", 0, "latest");
+    const sellsUSDT = await contract.queryFilter("SellForUSDT", 0, "latest");
+
+    let events = [...buysPOL, ...sellsPOL, ...buysUSDT, ...sellsUSDT];
+
+    events.sort((a, b) => a.blockNumber - b.blockNumber);
+
+    for (let e of events) {
+        const block = await provider.getBlock(e.blockNumber);
+        const time = block.timestamp;
+
+        if (time <= lastTime) continue;
+
+        if (e.eventName === "BuyWithPOL") {
+            let pol = toNum(e.args.polAmount);
+            currentPrice += (pol * 0.005);
+        }
+
+        if (e.eventName === "BuyWithUSDT") {
+            let usdt = toNum(e.args.usdtAmount, 6);
+            currentPrice += (usdt * 0.005);
+        }
+
+        if (e.eventName === "SellForPOL") {
+            let pol = toNum(e.args.polReceived);
+            currentPrice -= (pol * 0.002);
+            if (currentPrice < 100) currentPrice = 100;
+        }
+
+        if (e.eventName === "SellForUSDT") {
+            let usdt = toNum(e.args.usdtReceived, 6);
+            currentPrice -= (usdt * 0.002);
+            if (currentPrice < 100) currentPrice = 100;
+        }
+
+        history.push({
+            time: time,
+            value: currentPrice
+        });
+
+        lastTime = time;
+    }
+
+    lineSeries.setData(history);
+
+    console.log("History loaded:", history.length);
+}
+
+// ================= LIVE UPDATE =================
+async function updateLive() {
+    const price = await contract.usdPrice();
+
+    const newPoint = {
+        time: Math.floor(Date.now() / 1000),
+        value: Number(price) / 1e18
+    };
+
+    history.push(newPoint);
+    lineSeries.update(newPoint);
+}
+
+// ================= EVENT LISTEN =================
+function listenEvents() {
+    contract.on("BuyWithPOL", updateLive);
+    contract.on("SellForPOL", updateLive);
+    contract.on("BuyWithUSDT", updateLive);
+    contract.on("SellForUSDT", updateLive);
+}
+
+// ================= INIT =================
+async function init() {
+    await loadHistory();
+    listenEvents();
+
+    // fallback refresh every 1 min
+    setInterval(updateLive, 60000);
+}
+
+init();
+
+</script>
+
+</body>
+</html>
